@@ -11,182 +11,125 @@ import sys
 import ast
 import math
 import time
-import socket
 import re
 import hashlib
+import string
 import argparse
-import base64
-from collections import defaultdict, namedtuple
-import logging
+import json
 import logging as LOG
+from collections import defaultdict
 
 from Crypto.Hash import SHA
-from Crypto.Signature import PKCS1_v1_5
-from Crypto.PublicKey import RSA
-from Crypto import Random
 
-import fastminer
-
-
-PROTO_VERSION = "mainnnet0009"
-MINER_VERSION_ROOT = "morty"
-
-POOL_PORT = 5659
-STRIKE_TIMEOUT = 300
-STRIKE_COUNT = 3
-CONNECT_TIMEOUT = 5
-MINER_TUNE_GOAL = 10
-MINER_TUNE_HISTORY = 10
+from common import *
+import bismuth
 
 
 class Abuse(object):
-    ip_seen = defaultdict(int)
     ip_strikes = defaultdict(int)
+    ip_blocked = defaultdict(int)
 
     @classmethod
     def tick(cls):
+        """Maintain abuse mechanisms, preventing build-up of data"""
         now = time.time()
-        remove_list = list()
-        for ip, seen in cls.ip_seen.items():
-            if seen < (now - STRIKE_TIMEOUT):
-                remove_list.append(ip)
-        for ip in remove_list:
-            cls.reset(ip)
+        remove_ips = set()
+        for ip, block_until in cls.ip_blocked.items():
+            if block_until < now:
+                remove_ips.add(ip)
+        for ip, strikes in cls.ip_strikes.items():
+            if strikes == 0 and ip not in cls.ip_blocked:
+                remove_ips.add(ip)
+        for ip in remove_ips:
+            cls.reset(IpPort(ip, None))
 
     @classmethod
     def strikes(cls, ip):
         return cls.ip_strikes.get(ip, 0)
 
     @classmethod
-    def strike(cls, ip):
+    def strike(cls, peer):
+        ip = peer.ip
         if ip == '127.0.0.1':
             return False
         cls.ip_strikes[ip] += 1
-        cls.ip_seen[ip] = time.time()
         strikes = cls.ip_strikes[ip]
         if strikes >= STRIKE_COUNT:
+            cls.ip_blocked[ip] = time.time() + (STRIKE_TIME * STRIKE_COUNT)
             LOG.warning('IP %r - Blocked (%d strikes)', ip, strikes)
             return True
         return False
 
     @classmethod
-    def reset(cls, ip):
-        if ip in cls.ip_seen:
-            del cls.ip_seen[ip]
+    def reset(cls, peer):
+        ip = peer.ip
+        if ip in cls.ip_blocked:
+            del cls.ip_blocked[ip]
         if ip in cls.ip_strikes:
             del cls.ip_strikes[ip]
 
     @classmethod
-    def blocked(cls, ip):
+    def blocked(cls, peer):
+        ip = peer.ip
         strikes = cls.ip_strikes.get(ip, 0)
-        seen = cls.ip_seen.get(ip, None)
-        if seen is not None:
+        blocked_until = cls.ip_blocked.get(ip, None)
+        if blocked_until is not None:
             now = time.time()
-            if seen < (now - STRIKE_TIMEOUT):
-                cls.reset(ip)
-                strikes = 0
+            if blocked_until < now:
+                cls.reset(peer)
+                return False
         return strikes >= STRIKE_COUNT
 
 
-class Identity(object):
-    def __init__(self, keyfile=None, keydata=None):
-        if keyfile and keydata is None:
-            if not os.path.exists(keyfile):
-                random_generator = Random.new().read
-                secret = RSA.generate(1024, random_generator)
-                with open(keyfile, 'wb') as handle:
-                    handle.write(str(secret.exportKey()))
-            else:
-                with open(keyfile, 'rb') as handle:
-                    keydata = handle.read()
-        if keydata:
-            secret = RSA.importKey(keydata)
-
-        self.secret = secret
-        self.public = secret.publickey()
-        public_key_readable = str(self.public.exportKey())
-        self.public_key_hashed = base64.b64encode(public_key_readable)
-        self.address = hashlib.sha224(self.public_key_hashed).hexdigest()
-        self.signer = PKCS1_v1_5.new(self.secret)
-
-    def sign(self, data):
-        return base64.b64encode(self.signer.sign(data))
-
-class ProtocolBase(object):
-    def __init__(self, sock, manager):
-        self.peer = sock.getpeername()
-        self.sock = sock
-        self.manager = manager
-
-    def _send(self, *args):
-        for data in args:
-            data = str(data)
-            self.sock.sendall((str(len(data))).zfill(10))
-            self.sock.sendall(data)
-
-    def _recv(self, datalen=10):
-        data = self.sock.recv(datalen)
-        if not data:
-            return None
-        data = int(data)
-
-        chunks = []
-        bytes_recd = 0
-        while bytes_recd < data:
-            chunk = self.sock.recv(min(data - bytes_recd, 2048))
-            if chunk == b'':
-                raise RuntimeError("Socket connection broken")
-            chunks.append(chunk)
-            bytes_recd = bytes_recd + len(chunk)
-        segments = b''.join(chunks)
-        return segments
-
-
-MinerJob = namedtuple('MinerJob', ('diff', 'address', 'block'))
-MinerResult = namedtuple('MinerResult', ('diff', 'address', 'block', 'nonce'))
-
-
+# TODO: when there is no consensus, or we're behind ..
+#   run server.stop_accepting or server.start_accepting
 class Miners(object):
     def __init__(self, peers, bind=None, max_peers=1000):
         if bind is None:
             bind = ('127.0.0.1', POOL_PORT)
-        elif isinstance(bin, str):
+        elif isinstance(bind, str):
             bind = bind.split(':')
             bind[1] = int(bind[1])
         self.peers = peers
         self.pool = Pool(max_peers)
-        self.server = StreamServer(bind, self._on_connect, spawn=self.pool)
+        self.server = StreamServer(tuple(bind), self._on_connect, spawn=self.pool)
         self.server.start()
 
     def on_found(self, result, miner):
-        if not fastminer.verify(result.address, result.nonce, result.block, int(result.diff)):
-            ip = miner.peer[0]
-            Abuse.strike(ip)
-            if Abuse.blocked(ip):
+        # Ensure that the work delivered is exactly what was requested
+        valid = bismuth.verify(result.address, result.nonce, result.block, result.diff)
+        if not valid:
+            Abuse.strike(miner.sockaddr)
+            if Abuse.blocked(miner.sockaddr):
                 miner.close()
-            LOG.error('Invalid block submitted!')
+            LOG.error('Invalid block submitted! %r %r', result, miner.diff, valid)
             return False
-        # TODO: save contribution log for miner
-        ResultsManager.on_result(result)
-        return True
+        # The miner will not be punished for providing
+        # training blocks which don't match the right
+        # hash... but they won't be rewarded for the work
+        return ResultsManager.on_result(result, miner)
 
     def stop(self):
         self.server.stop()
         self.pool.kill()
 
     def _on_connect(self, socket, address):
-        if Abuse.blocked(address[0]):
+        peer = IpPort(*address)
+        if Abuse.blocked(peer):
             LOG.debug('Miner %r - accept() blocked: abuse', address)
             socket.close()
             return
-        client = MinerClient(socket, self)
+        client = MinerServer(socket, self)
         client.run()
 
 
-class MinerClient(ProtocolBase):
+# Don't allow client to submit same block twice
+# Verify that clients don't submit each others blocks
+# Verify that the block difficulty matches or is above that set by this code (the pool)
+class MinerServer(ProtocolBase):
     def __init__(self, sock, manager):
-        super(MinerClient, self).__init__(sock, manager)
-        self._version_ok = False
+        super(MinerServer, self).__init__(sock, manager)
+        self._reward_address = None
         self._history = []
         self._diff = 37
         self._last_found = None
@@ -195,6 +138,14 @@ class MinerClient(ProtocolBase):
         if self.sock:
             self.sock.close()
             self.sock = None
+
+    @property
+    def diff(self):
+        return self._diff
+
+    @property
+    def address(self):
+        return self._reward_address
 
     def _tune(self):
         # Fine-tune the difficulty so the miner finds at least 1 block every N seconds
@@ -212,14 +163,14 @@ class MinerClient(ProtocolBase):
                 best_time = avg_time
                 ideal_diff = diff
         if best_time > MINER_TUNE_GOAL:
-            ideal_diff -= 0.51
+            ideal_diff -= 1
         else:
             if self._last_found > (time.time() - MINER_TUNE_GOAL):
-                ideal_diff += 0.49
-        peers_diff = self.manager.peers.difficulty()
-        if ideal_diff > peers_diff:
-            ideal_diff = peers_diff
-        self._diff = ideal_diff
+                ideal_diff += 0.5
+        peers_diff = int(self.manager.peers.difficulty())
+        our_height = ResultsManager.HEIGHTS.keys()
+        our_height = max(our_height) + 1 if len(our_height) else 37
+        self._diff = min(our_height, sum([peers_diff, ideal_diff]) / 2)
         # Trim history
         if len(self._history) > MINER_TUNE_HISTORY:
             self._history = self._history[0 - MINER_TUNE_HISTORY:]
@@ -229,11 +180,19 @@ class MinerClient(ProtocolBase):
         pass
 
     def _cmd_version(self):
+        """
+        Check client version string, and save their reward address
+        """
         version = self._recv().split('.')
-        self._version_ok = version[0] == MINER_VERSION_ROOT
-        if self._version_ok:
-            LOG.info('Miner %r - Accepted, version: %r', self.peer, version)
-        self._send('ok' if self._version_ok else 'notok')
+        rewards = self._recv()
+        if version[0] != MINER_VERSION_ROOT:
+            self._send('notok')
+            return self.close()
+        is_hex = all(c in string.hexdigits for c in rewards)
+        if len(rewards) == 56 and is_hex:
+            self._reward_address = rewards
+        LOG.info('Client connected: version="%r" address="%r"', version, self._reward_address)
+        self._send('ok')
 
     def _cmd_miner_fetch(self):
         # TODO: retrieve most appropriate data to work on...
@@ -252,8 +211,8 @@ class MinerClient(ProtocolBase):
             items = (self._recv(), self._recv(), self._recv())
             result = MinerResult(float(items[0]), self.manager.peers.identity.address, items[1], items[2])
         except Exception as ex:
-            LOG.exception("Miner %r - Rejecting Items: %r - %r", self.peer, items, ex)
-            Abuse.strike(self.peer[0])
+            LOG.exception("Miner %r - Rejecting Items: %r - %r", self.sockaddr, items, ex)
+            Abuse.strike(self.sockaddr)
             return self._cmd_miner_fetch()  # wat u send, thafuq?
         if result:
             if self.manager.on_found(result, self):
@@ -261,9 +220,7 @@ class MinerClient(ProtocolBase):
                     mine_duration = time.time() - self._last_found
                     self._history.append((self._diff, mine_duration))
                 self._last_found = time.time()
-            else:
-                # If its submitting shitty jobs, what do we do?
-                pass
+            # Finally, re-calculate the diff rate etc...
             self._tune()
         return self._cmd_miner_fetch()
 
@@ -282,12 +239,12 @@ class MinerClient(ProtocolBase):
                     break
                 cmd_func = getattr(self, '_cmd_' + cmd_name, None)
                 if not cmd_func:
-                    raise RuntimeError('Miner %r - Unknown CMD: %r' % (self.peer, cmd_name))
-                LOG.info("Miner %r - Invalid Command: %r", self.peer, cmd_name)
+                    raise RuntimeError('Miner %r - Unknown CMD: %r' % (self.sockaddr, cmd_name))
+                LOG.info("Miner %r - Invalid Command: %r", self.sockaddr, cmd_name)
                 cmd_func()
         except Exception as ex:
-            LOG.exception("Miner %r - Error running: %r", self.peer, ex)
-            Abuse.strike(self.peer[0])
+            LOG.exception("Miner %r - Error running: %r", self.sockaddr, ex)
+            Abuse.strike(self.sockaddr)
         finally:
             self.close()
 
@@ -303,7 +260,7 @@ class BismuthClient(ProtocolBase):
             ])
         else:
             self.blocks = list([
-                (1, "3dc735c74859de7e173b255851b13d32fed942c69b8f76b1cbdbd34a", None)
+                (97577, "ae52e2f26cec678478b77692e4db5b78aa526822b1d6a657024215a5", None)
             ])
         self.blockheight = self.blocks[0][0]
         self.blockhash = self.blocks[0][1]
@@ -347,13 +304,13 @@ class BismuthClient(ProtocolBase):
             self._send("version", PROTO_VERSION)
             data = self._recv()
             if data != "ok":
-                raise RuntimeError("Peer %r - protocol mismatch: %r %r" % (self.peer, data, PROTO_VERSION))
+                raise RuntimeError("Peer %r - protocol mismatch: %r %r" % (self.sockaddr, data, PROTO_VERSION))
                 return False
         except Exception as ex:
-            Abuse.strike(self.peer[0])
-            LOG.warning("Peer %r - Connect/Hello error: %r", self.peer, ex)
+            Abuse.strike(self.sockaddr)
+            LOG.warning("Peer %r - Connect/Hello error: %r", self.sockaddr, ex)
             return False
-        LOG.info('Peer %r - Connected', self.peer)
+        LOG.info('Peer %r - Connected', self.sockaddr)
         return True
 
     def _cmd_nonewblk(self):
@@ -401,6 +358,7 @@ class BismuthClient(ProtocolBase):
         self.blocks = filter(lambda x: x[1] != block_hash_delete, self.blocks)
         self.manager.block_remove(block_hash_delete)
         if block_hash_delete in (self.blockhash, self.their_blockhash):
+            print("Deleting block:", self.blocks, block_hash_delete, self.blockhash, self.their_blockhash)
             self.blockhash = self.blocks[-1][1]
             self.blockheight = self.blocks[-1][0]
 
@@ -455,11 +413,11 @@ class BismuthClient(ProtocolBase):
             cmd_func = getattr(self, '_cmd_' + cmd_name, None)
 
             if not cmd_func:
-                LOG.warning('Peer %r - Unknown CMD: %r' % (self.peer, cmd_name))
+                LOG.warning('Peer %r - Unknown CMD: %r' % (self.sockaddr, cmd_name))
                 self.close()
                 return False
 
-            LOG.info("Peer %r - Sent: %r", self.peer, cmd_name)
+            LOG.info("Peer %r - Sent: %r", self.sockaddr, cmd_name)
             cmd_func()
         return True
 
@@ -468,25 +426,34 @@ class ResultsManager(object):
     HEIGHTS = dict()
     BLOCK = None
     HIGHEST = 0
+    LOGHANDLE = None
 
     @classmethod
-    def on_consensus(cls, block):
-        if cls.BLOCK == block:
+    def on_consensus(cls, consensus):
+        if cls.BLOCK == consensus:
             return
         cls.HEIGHTS = dict()
-        cls.BLOCK = block
+        cls.BLOCK = consensus
         cls.HIGHEST = 0
-        LOG.warning('New consensus: %r', block)
+        if cls.LOGHANDLE:
+            cls.LOGHANDLE.close()
+        filename = 'audit/%d.block' % (int(consensus[0]))
+        cls.LOGHANDLE = open(filename, 'a')
+        LOG.warning('New consensus: %r', consensus)
 
     @classmethod
-    def on_result(cls, result):
-        if cls.BLOCK and result.block != cls.BLOCK[1]:
+    def on_result(cls, result, miner):
+        if not cls.BLOCK or result.block != cls.BLOCK[1]:
+            # If no latest consensus block - ignore, it's training data
             return False
-        if result.diff <= cls.HIGHEST:
-            return False
-        cls.HIGHEST = result.diff
-        cls.HEIGHTS[int(result.diff)] = result
-        LOG.warning('New highest for %s: %.2f', result.block, result.diff)
+        if result.diff > cls.HIGHEST:
+            cls.HIGHEST = result.diff
+            cls.HEIGHTS[int(result.diff)] = result
+            LOG.warning('New highest for %s: %d', result.block, result.diff)
+        if cls.LOGHANDLE:
+            cls.LOGHANDLE.write(json.dumps([
+                time.time(), miner.address, int(result.diff), result.nonce
+            ]) + "\n")
         return True
 
     @classmethod
@@ -494,14 +461,15 @@ class ResultsManager(object):
         block_send = list()
         for dbdata in mempool:
             transaction = (
-                str(dbdata[0]), str(dbdata[1][:56]), str(dbdata[2][:56]), '%.8f' % float(dbdata[3]), str(dbdata[4]), str(dbdata[5]), str(dbdata[6]),
+                str(dbdata[0]), str(dbdata[1][:56]), str(dbdata[2][:56]),
+                '%.8f' % float(dbdata[3]), str(dbdata[4]), str(dbdata[5]), str(dbdata[6]),
                 str(dbdata[7]))  # create tuple
             # print transaction
             block_send.append(transaction)  # append tuple to list for each run
-            removal_signature.append(str(dbdata[4]))  # for removal after successful mining
 
         block_timestamp = '%.2f' % time.time()
-        transaction_reward = (str(block_timestamp), str(result.address[:56]), str(result.address[:56]), '%.8f' % float(0), "0", str(result.nonce))  # only this part is signed!
+        transaction_reward = (str(block_timestamp), str(result.address[:56]), str(result.address[:56]),
+                              '%.8f' % float(0), "0", str(result.nonce))  # only this part is signed!
 
         transaction_hash = SHA.new(str(transaction_reward))
         signature_b64 = identity.sign(transaction_hash)
@@ -531,14 +499,14 @@ class PeerManager(object):
         )
 
     def add(self, peer):
-        if peer not in self.peers and not Abuse.blocked(peer[0]):
-            print("Adding peer", peer)
+        assert isinstance(peer, IpPort)
+        if peer not in self.peers and not Abuse.blocked(peer):
             return spawn(self._run, peer)
 
     def difficulty(self):
-        values = [peer._diff for peer in self.peers.values()]
+        values = [peer._diff for peer in self.peers.values() if peer.synched]
         if len(values):
-            return sum(values) / float(len(self.peers))
+            return sum(values) / float(len(values))
         return 37
 
     def block_add(self, block):
@@ -591,9 +559,9 @@ class PeerManager(object):
                 sock.settimeout(None)
                 client = BismuthClient(sock, self)
             except socket.error as ex:
-                Abuse.strike(peer[0])
-                LOG.info("Peer %s:%d - Connect Error (%d strikes): %r",
-                         peer[0], int(peer[1]), Abuse.strikes(peer[0]), ex)
+                Abuse.strike(peer)
+                LOG.info("Peer %r - Connect Error (%d strikes): %r",
+                         peer, Abuse.strikes(peer), ex)
         try:
             if client:
                 fail = False
@@ -604,17 +572,19 @@ class PeerManager(object):
                         self.peers[peer] = client
                 except Exception as ex:
                     fail = True
-                    Abuse.strike(peer[0])
-                    LOG.info("Peer handshake with %s:%d (%d strikes) - %r",
-                             peer[0], int(peer[1]), Abuse.strikes(peer[0]), ex)
+                    Abuse.strike(peer)
+                    LOG.info("Peer %r - Handshake error (%d strikes) - %r",
+                             peer, Abuse.strikes(peer), ex)
                 else:
-                    Abuse.reset(peer[0])
+                    Abuse.reset(peer)
                     client.run()
                 if fail:
                     client.close()
                     client = None
+        except socket.error as ex:
+            LOG.warning('Peer %r - Socket Error: %r', peer, ex)
         except Exception as ex:
-            LOG.exception("Peer run error (%r) %r", peer, ex)
+            LOG.exception("Peer %r - Run Error %r", peer, ex)
         finally:
             try:
                 if client:
@@ -627,14 +597,8 @@ class PeerManager(object):
                 del self.peers[peer]
 
 
-def read_peers(peers_file="../peers.txt"):
-    return [('127.0.0.1', 5658)]
-    """
-    return [
-        ('127.0.0.1', 5658),
-        ('127.0.0.1', POOL_PORT),
-    ]
-    """
+def read_peers(peers_file):
+    # return []
     with open(peers_file, 'r') as handle:
         peers = [ast.literal_eval(row) for row in handle]
         shuffle(peers)
@@ -642,24 +606,24 @@ def read_peers(peers_file="../peers.txt"):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='FastBismuth Node')
+    parser = argparse.ArgumentParser(description='PooledBismuth Node')
     parser.add_argument('-v', '--verbose', action='store_const',
-                        dest="loglevel", const=logging.INFO,
+                        dest="loglevel", const=LOG.INFO,
                         help="Log informational messages")
     parser.add_argument('--debug', action='store_const', dest="loglevel",
-                        const=logging.DEBUG, default=logging.WARNING,
+                        const=LOG.DEBUG, default=LOG.WARNING,
                         help="Log debugging messages")
     parser.add_argument('--keyfile', help="Load/save file for miner secret identity", metavar='PATH')
-    parser.add_argument('-p', '--peers', help="Load/save file for found peers", metavar='PATH')
+    parser.add_argument('-p', '--peers', help="Load/save file for found peers", default='peers.txt', metavar='PATH')
     parser.add_argument('-l', '--listen', metavar="LISTEN", default='127.0.0.1:' + str(POOL_PORT), help="Listener port for miners")
     opts = parser.parse_args()
-    logging.basicConfig(level=opts.loglevel)
+    LOG.basicConfig(level=opts.loglevel)
     return opts
 
 
 def main():
     opts = parse_args()
-    peer_list = read_peers()
+    bootstrap_peers = read_peers(opts.peers)
     identity = Identity('.bismuth.key')
     LOG.warning('Pool identity: %s', identity.address)
     peers = PeerManager(identity)
@@ -669,9 +633,9 @@ def main():
     try:
         # peers.add(('127.0.0.1', '5868'))
         while True:
-            shuffle(peer_list)
-            for peer in peer_list[:10]:
-                peers.add(peer)
+            shuffle(bootstrap_peers)
+            for sockaddr in bootstrap_peers[:10]:
+                peers.add(IpPort(*sockaddr))
                 time.sleep(0.1)
             Abuse.tick()
             print("")
@@ -700,7 +664,10 @@ def main():
                 for peer in peers.peers.values():
                     if peer.synched and int(diff) >= math.floor(peer._diff):
                         new_txn = ResultsManager.sign_blocks(identity, result, peer.mempool)
-                        peer.submit_block(new_txn)
+                        try:
+                            peer.submit_block(new_txn)
+                        except Exception:
+                            LOG.exception('Peer %r - Error Submitting Block')
                 print("")
             time.sleep(2)
     except KeyboardInterrupt:
