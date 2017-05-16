@@ -13,7 +13,7 @@ def double_N(value, times):
 
 
 def load_block(blockno, block_key):
-    filename = 'audit/%d.block' % (blockno,)
+    filename = 'data/done/%d.block' % (blockno,)
     if not os.path.exists(filename):
         return False, None, None
     did_win = False
@@ -30,6 +30,8 @@ def load_block(blockno, block_key):
                 proofs.append(proof)
     except ValueError:
         return False, None, None
+    if not difficulty and len(proofs):
+        difficulty = sum([X[2] for X in proofs]) / len(proofs)
     return did_win, proofs, difficulty
 
 
@@ -112,7 +114,7 @@ conn.text_factory = str
 c = conn.cursor()
 c.execute("""
     SELECT block_height, reward, openfield, timestamp, address FROM transactions
-    WHERE address = recipient AND block_height > 90000 AND reward > 0
+    WHERE address = recipient AND block_height > 90000
 """)  # , (myid.public_key_hashed,))
 result = c.fetchall()
 
@@ -124,10 +126,14 @@ for row in result:
     total_shares = 0
     total_work = 0
     named_shares = 0
+    share_dist = dict()
     if proofs:
         total_shares, named_shares, share_dist, work_counts, total_work = proof_histogram(proofs)
     named_work = 0
     print("Block %d = BIS %.2f" % (blockno, reward,))
+    print(row)
+    did_win = myid.address == row[4]
+    print(row[4], myid.public_key_hashed)
     if did_win:
         address_ids = make_address_ids(poolcur, share_dist.keys())
         workproof_rows = list()
@@ -149,5 +155,8 @@ for row in result:
     poolcur.execute("""
     REPLACE INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (blockno, row[3], int(did_win), total_shares, row[2], reward, row[4], difficulty, total_work, named_work, named_shares))
+
+    # Openfield cost:
+    # float(len(db_openfield)) / 100000
 
 pooldb.commit()

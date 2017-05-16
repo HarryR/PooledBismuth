@@ -1,19 +1,16 @@
 <?php
-function database () {
-    $file_db = new PDO('sqlite:../.pool.db');
-    $file_db->setAttribute(PDO::ATTR_ERRMODE,  PDO::ERRMODE_EXCEPTION);
-    $file_db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-    return $file_db;
-}
-
-$db = database();
+require_once '.common.php';
 
 $workproof = array();
 $address_ids = array();
 $block_ids = array();
 $addresses = array();
 
-$sql = "SELECT * FROM blocks WHERE won = 1 ORDER BY id DESC LIMIT 120";
+$input_hours = max(intval(param('hours')), 1);
+$now = time();
+$stamp_begin = $now - ($input_hours * (60 * 60));
+
+$sql = "SELECT * FROM blocks WHERE stamp >= $stamp_begin ORDER BY id DESC, stamp DESC";
 $block_list = $db->query($sql)->fetchAll();
 foreach( $block_list AS $block ) {
 	$block_ids []= intval($block['id']);
@@ -37,7 +34,7 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 
 <html>
 	<head>
-		<title>Pool Statistics</title>
+		<title>1 Hour Pool Statistics</title>
 		<!-- Google Fonts -->
 		<link rel="stylesheet" href="//fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
 
@@ -46,6 +43,16 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 
 		<!-- Milligram CSS minified -->
 		<link rel="stylesheet" href="//cdn.rawgit.com/milligram/milligram/master/dist/milligram.min.css">
+
+		<style>
+		.win {
+			background-color: #c0ffa5;
+			border-top: 10px solid #333 !important;
+		}
+		.lose {
+			background-color: #f9d4d4;
+		}
+		</style>
 	</head>
 	<body>
 			<main class="wrapper">
@@ -58,10 +65,20 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 			</header>
 
 			<section class="container">
+				<h3>Stats</h3>
+				<table>
+					<tr>
+						<th>Blocks Mined</th>
+					</tr>
+				</table>
+			</section>
+
+			<section class="container">
 				<h3>Most Recent Blocks</h3>
 				<table>
 					<tr>
 						<th>Height</th>
+						<th>Diff</th>
 						<th>Reward</th>
 						<th>Nonce</th>
 						<th>Shares</th>
@@ -78,6 +95,7 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 				?>
 					<tr class="<?= $row['won'] ? 'win' : 'lose' ?>">
 						<td><?= $row['id'] ?></td>
+						<td><?= $row['difficulty'] ?></td>
 						<td><?= round($row['reward'], 2) ?></td>
 						<td><?= $row['nonce'] ?></td>
 						<td><?= $row['total_shares'] ?></td>
@@ -96,17 +114,16 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 							<table style="margin-left: 50px;">
 								<tr>
 									<th>Payout Address</th>
-									<th>Reward</th>
 									<th>Shares</th>
-									<th>Work</th>
-									<th>Reward Pct</th>
+									<th>Reward</th>
+									<th>Pct</th>
 								</tr>
 							<?php foreach( $proofs AS $proof ): ?>
 								<?php $address = $addresses[$proof['address_id']]; ?>
 								<tr>
 									<td><?= $address ?></td>
-									<td><?= round($proof['reward'], 2); ?></td>
 									<td><?= $proof['shares']; ?></td>
+									<td style="text-align: right;"><?= round($proof['reward'], 2); ?></td>
 									<td>
 										<?= round($proof['shares'] / ($row['named_shares'] / 100), 2) ?>%
 									</td>

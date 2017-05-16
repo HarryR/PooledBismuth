@@ -260,7 +260,7 @@ class BismuthClient(ProtocolBase):
             ])
         else:
             self.blocks = list([
-                (97577, "ae52e2f26cec678478b77692e4db5b78aa526822b1d6a657024215a5", None)
+                (98312, "8618dda7a8c5213ca56169d2459e62231c3fd834d60446f554195efb", None)
             ])
         self.blockheight = self.blocks[0][0]
         self.blockhash = self.blocks[0][1]
@@ -358,9 +358,10 @@ class BismuthClient(ProtocolBase):
         self.blocks = filter(lambda x: x[1] != block_hash_delete, self.blocks)
         self.manager.block_remove(block_hash_delete)
         if block_hash_delete in (self.blockhash, self.their_blockhash):
-            print("Deleting block:", self.blocks, block_hash_delete, self.blockhash, self.their_blockhash)
-            self.blockhash = self.blocks[-1][1]
-            self.blockheight = self.blocks[-1][0]
+            if len(self.blocks):
+                print("Deleting block:", self.blocks, block_hash_delete, self.blockhash, self.their_blockhash)
+                self.blockhash = self.blocks[-1][1]
+                self.blockheight = self.blocks[-1][0]
 
     def _cmd_sync(self):
         self._send("blockheight", self.blockheight)
@@ -427,6 +428,7 @@ class ResultsManager(object):
     BLOCK = None
     HIGHEST = 0
     LOGHANDLE = None
+    LOGFILENAME = None
 
     @classmethod
     def on_consensus(cls, consensus):
@@ -435,10 +437,27 @@ class ResultsManager(object):
         cls.HEIGHTS = dict()
         cls.BLOCK = consensus
         cls.HIGHEST = 0
+
         if cls.LOGHANDLE:
+            cls.LOGHANDLE.flush()
             cls.LOGHANDLE.close()
-        filename = 'audit/%d.block' % (int(consensus[0]))
+            if cls.LOGFILENAME:
+                done_filename = 'data/done/%d.block' % (int(consensus[0]))
+                if not os.path.exists(done_filename):
+                    os.rename(cls.LOGFILENAME, done_filename)
+                else:
+                    LOG.warning('Merging block logs: %r -> %r', cls.LOGFILENAME, done_filename)
+                    with open(done_filename, 'a') as handle_output:
+                        with open(cls.LOGFILENAME, 'r') as handle_input:
+                            while True:
+                                data = handle_input.read(4096)
+                                if not data:
+                                    break
+                                handle_output.write(data)
+
+        filename = 'data/audit/%d.block' % (int(consensus[0]))
         cls.LOGHANDLE = open(filename, 'a')
+        cls.LOGFILENAME = filename
         LOG.warning('New consensus: %r', consensus)
 
     @classmethod
@@ -534,7 +553,7 @@ class PeerManager(object):
           * Percentage of votes
         """
         if not blocks:
-            blocks = [peer.blocks[-1] for peer in self.peers.values() if peer.synched]
+            blocks = [peer.blocks[-1] for peer in self.peers.values() if len(peer.blocks) and peer.synched]
         counts = defaultdict(int)
         heights = dict()
         for block in blocks:
