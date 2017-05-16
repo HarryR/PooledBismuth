@@ -6,13 +6,24 @@ $address_ids = array();
 $block_ids = array();
 $addresses = array();
 
-$input_hours = max(intval(param('hours')), 1);
+$input_hours = min(max(intval(param('hours')), 1), 12);
 $now = time();
 $stamp_begin = $now - ($input_hours * (60 * 60));
 
 $sql = "SELECT * FROM blocks WHERE stamp >= $stamp_begin ORDER BY id DESC, stamp DESC";
 $block_list = $db->query($sql)->fetchAll();
+if( 0 == count($block_list) ) {
+	die('FATAL ERROR');
+}
+
+$latest_block = $block_list[0];
+$blocks_end = $block_list[0]['stamp'];
+$blocks_begin = $block_list[ count($block_list) - 1 ]['stamp'];
+$reward_total = 0;
 foreach( $block_list AS $block ) {
+	if( $block['won'] ) {
+		$reward_total += $block['reward'];
+	}
 	$block_ids []= intval($block['id']);
 }
 
@@ -30,6 +41,10 @@ $sql = sprintf("SELECT id, address FROM addresses WHERE id IN (%s)", implode(','
 foreach( $db->query($sql)->fetchAll() AS $row ) {
 	$addresses[$row['id']] = $row['address'];
 }
+
+/*
+SELECT (SUM(wp.shmeckles) / (MAX(b.stamp) - MIN(b.stamp))) * 60 * 60, wp.addr                                                                              GROUP BY address_id;
+*/
 ?>
 
 <html>
@@ -57,18 +72,14 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 	<body>
 			<main class="wrapper">
 
-			<header class="header" id="home">
-				<section class="container">
-					<br />
-					<h1>Pool Statistics</h1>
-				</section>
-			</header>
-
 			<section class="container">
-				<h3>Stats</h3>
 				<table>
 					<tr>
-						<th>Blocks Mined</th>
+						<th style="text-align: right;">Mining Rate</th>
+						<td><?= round(($reward_total / ($blocks_end - $blocks_begin)) * 60 * 60,2) ?> BIS/hour</td>
+
+						<th style="text-align: right;">Exchange Rate</th>
+						<td>1 SHM = <?= round($latest_block['pool_balance'] / $latest_block['pool_shmeckles'], 2) ?> BIS</td>
 					</tr>
 				</table>
 			</section>
@@ -76,29 +87,32 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 			<section class="container">
 				<h3>Most Recent Blocks</h3>
 				<table>
-					<tr>
-						<th>Height</th>
-						<th>Diff</th>
-						<th>Reward</th>
-						<th>Nonce</th>
-						<th>Shares</th>
-						<th>Work</th>
-						<th>Bonus</th>
-					</tr>
 
 				<?php
-				foreach( $block_list AS $row ):
+				foreach( $block_list AS $idx => $row ):
 					$proofs = NULL;
 					if( isset($workproof[$row['id']]) ) {
 						$proofs = $workproof[$row['id']];
 					}
 				?>
+					<?php if( ! ($idx % 25) ): ?>
+					<tr>
+						<th>Height</th>
+						<th>Diff</th>
+						<th>Reward</th>
+						<th>Address</th>
+						<th>Nonce</th>
+						<th>POW</th>
+						<th>Anon%</th>
+					</tr>
+					<?php endif; ?>
+
 					<tr class="<?= $row['won'] ? 'win' : 'lose' ?>">
 						<td><?= $row['id'] ?></td>
 						<td><?= $row['difficulty'] ?></td>
 						<td><?= round($row['reward'], 2) ?></td>
+						<td><?= substr($row['address'], 0, 10) ?></td>
 						<td><?= $row['nonce'] ?></td>
-						<td><?= $row['total_shares'] ?></td>
 						<td><?= $row['total_work'] ?></td>
 						<td>
 							<?php if( $row['total_shares'] > 0 ): ?>
@@ -110,25 +124,27 @@ foreach( $db->query($sql)->fetchAll() AS $row ) {
 					</tr>
 					<?php if( $proofs ): ?>
 					<tr>
-						<td colspan="4">
+						<td colspan="6">
 							<table style="margin-left: 50px;">
 								<tr>
-									<th>Payout Address</th>
-									<th>Shares</th>
-									<th>Reward</th>
-									<th>Pct</th>
+									<th>Address</th>
+									<th>Shmeckles</th>
+									<th>Bismuth</th>
 								</tr>
 							<?php foreach( $proofs AS $proof ): ?>
 								<?php $address = $addresses[$proof['address_id']]; ?>
 								<tr>
 									<td><?= $address ?></td>
-									<td><?= $proof['shares']; ?></td>
-									<td style="text-align: right;"><?= round($proof['reward'], 2); ?></td>
-									<td>
-										<?= round($proof['shares'] / ($row['named_shares'] / 100), 2) ?>%
-									</td>
+									<td><?= sprintf("%.2f", $proof['shmeckles']); ?></td>
+									<td><?= sprintf("%.2f", ($proof['shmeckles'] / $row['pool_shmeckles']) * $row['pool_balance'] ); ?></td>
 								</tr>
 							<?php endforeach; ?>
+
+								<tr>
+									<th>Total</th>
+									<th><?= sprintf("%.2f", $row['pool_shmeckles']) ?></th>
+									<th><?= sprintf("%.2f", $row['pool_balance']) ?></th>
+								</tr>
 							</table>
 							<br />
 						</td>

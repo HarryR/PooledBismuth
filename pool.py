@@ -169,8 +169,8 @@ class MinerServer(ProtocolBase):
                 ideal_diff += 0.5
         peers_diff = int(self.manager.peers.difficulty())
         our_height = ResultsManager.HEIGHTS.keys()
-        our_height = max(our_height) + 1 if len(our_height) else 37
-        self._diff = min(our_height, sum([peers_diff, ideal_diff]) / 2)
+        our_height = (max(our_height) + 1) if len(our_height) else 37
+        self._diff = min([our_height, sum([peers_diff, ideal_diff]) / 2])
         # Trim history
         if len(self._history) > MINER_TUNE_HISTORY:
             self._history = self._history[0 - MINER_TUNE_HISTORY:]
@@ -441,19 +441,18 @@ class ResultsManager(object):
         if cls.LOGHANDLE:
             cls.LOGHANDLE.flush()
             cls.LOGHANDLE.close()
-            if cls.LOGFILENAME:
-                done_filename = 'data/done/%d.block' % (int(consensus[0]))
-                if not os.path.exists(done_filename):
-                    os.rename(cls.LOGFILENAME, done_filename)
-                else:
-                    LOG.warning('Merging block logs: %r -> %r', cls.LOGFILENAME, done_filename)
-                    with open(done_filename, 'a') as handle_output:
-                        with open(cls.LOGFILENAME, 'r') as handle_input:
-                            while True:
-                                data = handle_input.read(4096)
-                                if not data:
-                                    break
-                                handle_output.write(data)
+            done_filename = 'data/done/%d.block' % (int(consensus[0]))
+            if cls.LOGFILENAME is not None and not os.path.exists(done_filename):
+                os.rename(cls.LOGFILENAME, done_filename)
+            else:
+                LOG.warning('Merging block logs: %r -> %r', cls.LOGFILENAME, done_filename)
+                with open(done_filename, 'a') as handle_output:
+                    with open(cls.LOGFILENAME, 'r') as handle_input:
+                        while True:
+                            data = handle_input.read(4096)
+                            if not data:
+                                break
+                            handle_output.write(data)
 
         filename = 'data/audit/%d.block' % (int(consensus[0]))
         cls.LOGHANDLE = open(filename, 'a')
