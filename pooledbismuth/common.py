@@ -1,8 +1,11 @@
-from collections import namedtuple
-import socket
 import os
+import time
+import socket
 import base64
 import hashlib
+import logging as LOG
+from collections import namedtuple, defaultdict
+
 from Crypto import Random
 from Crypto.Signature import PKCS1_v1_5
 from Crypto.PublicKey import RSA
@@ -25,6 +28,62 @@ MinerJob = namedtuple('MinerJob', ('diff', 'address', 'block'))
 MinerResult = namedtuple('MinerResult', ('diff', 'address', 'block', 'nonce'))
 
 IpPort = namedtuple('IpPort', ('ip', 'port'))
+
+
+class Abuse(object):
+    ip_strikes = defaultdict(int)
+    ip_blocked = defaultdict(int)
+
+    @classmethod
+    def tick(cls):
+        """Maintain abuse mechanisms, preventing build-up of data"""
+        now = time.time()
+        remove_ips = set()
+        for ip, block_until in cls.ip_blocked.items():
+            if block_until < now:
+                remove_ips.add(ip)
+        for ip, strikes in cls.ip_strikes.items():
+            if strikes == 0 and ip not in cls.ip_blocked:
+                remove_ips.add(ip)
+        for ip in remove_ips:
+            cls.reset(IpPort(ip, None))
+
+    @classmethod
+    def strikes(cls, ip):
+        return cls.ip_strikes.get(ip, 0)
+
+    @classmethod
+    def strike(cls, peer):
+        ip = peer.ip
+        if ip == '127.0.0.1':
+            return False
+        cls.ip_strikes[ip] += 1
+        strikes = cls.ip_strikes[ip]
+        if strikes >= STRIKE_COUNT:
+            cls.ip_blocked[ip] = time.time() + (STRIKE_TIME * STRIKE_COUNT)
+            LOG.warning('IP %r - Blocked (%d strikes)', ip, strikes)
+            return True
+        return False
+
+    @classmethod
+    def reset(cls, peer):
+        ip = peer.ip
+        if ip in cls.ip_blocked:
+            del cls.ip_blocked[ip]
+        if ip in cls.ip_strikes:
+            del cls.ip_strikes[ip]
+
+    @classmethod
+    def blocked(cls, peer):
+        ip = peer.ip
+        strikes = cls.ip_strikes.get(ip, 0)
+        blocked_until = cls.ip_blocked.get(ip, None)
+        if blocked_until is not None:
+            now = time.time()
+            if blocked_until < now:
+                cls.reset(peer)
+                return False
+        return strikes >= STRIKE_COUNT
 
 
 class Identity(object):

@@ -1,97 +1,42 @@
 #!/usr/bin/env python
 from __future__ import print_function
+
 from gevent import monkey, spawn
 monkey.patch_all()
 from gevent.pool import Pool
 from gevent.socket import wait_read
 from gevent.server import StreamServer
-from random import shuffle
+
 import os
-import sys
-import ast
-import math
-import time
 import re
-import hashlib
-import string
-import argparse
+import ast
+import time
 import json
+import string
+import socket
+import hashlib
 import logging as LOG
+from random import shuffle
 from collections import defaultdict
 
 from Crypto.Hash import SHA
 
-from common import *
-import bismuth
-
-
-class Abuse(object):
-    ip_strikes = defaultdict(int)
-    ip_blocked = defaultdict(int)
-
-    @classmethod
-    def tick(cls):
-        """Maintain abuse mechanisms, preventing build-up of data"""
-        now = time.time()
-        remove_ips = set()
-        for ip, block_until in cls.ip_blocked.items():
-            if block_until < now:
-                remove_ips.add(ip)
-        for ip, strikes in cls.ip_strikes.items():
-            if strikes == 0 and ip not in cls.ip_blocked:
-                remove_ips.add(ip)
-        for ip in remove_ips:
-            cls.reset(IpPort(ip, None))
-
-    @classmethod
-    def strikes(cls, ip):
-        return cls.ip_strikes.get(ip, 0)
-
-    @classmethod
-    def strike(cls, peer):
-        ip = peer.ip
-        if ip == '127.0.0.1':
-            return False
-        cls.ip_strikes[ip] += 1
-        strikes = cls.ip_strikes[ip]
-        if strikes >= STRIKE_COUNT:
-            cls.ip_blocked[ip] = time.time() + (STRIKE_TIME * STRIKE_COUNT)
-            LOG.warning('IP %r - Blocked (%d strikes)', ip, strikes)
-            return True
-        return False
-
-    @classmethod
-    def reset(cls, peer):
-        ip = peer.ip
-        if ip in cls.ip_blocked:
-            del cls.ip_blocked[ip]
-        if ip in cls.ip_strikes:
-            del cls.ip_strikes[ip]
-
-    @classmethod
-    def blocked(cls, peer):
-        ip = peer.ip
-        strikes = cls.ip_strikes.get(ip, 0)
-        blocked_until = cls.ip_blocked.get(ip, None)
-        if blocked_until is not None:
-            now = time.time()
-            if blocked_until < now:
-                cls.reset(peer)
-                return False
-        return strikes >= STRIKE_COUNT
+from .common import Abuse, IpPort, ProtocolBase, MinerResult, Identity
+from .common import POOL_PORT, MINER_TUNE_GOAL, MINER_TUNE_HISTORY, MINER_VERSION_ROOT, PROTO_VERSION, CONNECT_TIMEOUT
+from . import bismuth
 
 
 # TODO: when there is no consensus, or we're behind ..
 #   run server.stop_accepting or server.start_accepting
 class Miners(object):
-    def __init__(self, peers, bind=None, max_peers=1000):
+    def __init__(self, peers, bind=None, max_conns=5000):
         if bind is None:
             bind = ('127.0.0.1', POOL_PORT)
         elif isinstance(bind, str):
             bind = bind.split(':')
             bind[1] = int(bind[1])
         self.peers = peers
-        self.pool = Pool(max_peers)
+        self.pool = Pool(max_conns)
         self.server = StreamServer(tuple(bind), self._on_connect, spawn=self.pool)
         self.server.start()
 
@@ -454,7 +399,7 @@ class ResultsManager(object):
                                 break
                             handle_output.write(data)
 
-        filename = 'data/audit/%d.block' % (int(consensus[0]))
+        filename = 'data/audit/%d.block' % (int(consensus[0]),)
         cls.LOGHANDLE = open(filename, 'a')
         cls.LOGFILENAME = filename
         LOG.warning('New consensus: %r', consensus)
@@ -613,85 +558,3 @@ class PeerManager(object):
                 LOG.exception("While closing peer")
             if peer in self.peers:
                 del self.peers[peer]
-
-
-def read_peers(peers_file):
-    # return []
-    with open(peers_file, 'r') as handle:
-        peers = [ast.literal_eval(row) for row in handle]
-        shuffle(peers)
-        return peers
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='PooledBismuth Node')
-    parser.add_argument('-v', '--verbose', action='store_const',
-                        dest="loglevel", const=LOG.INFO,
-                        help="Log informational messages")
-    parser.add_argument('--debug', action='store_const', dest="loglevel",
-                        const=LOG.DEBUG, default=LOG.WARNING,
-                        help="Log debugging messages")
-    parser.add_argument('--keyfile', help="Load/save file for miner secret identity", metavar='PATH')
-    parser.add_argument('-p', '--peers', help="Load/save file for found peers", default='peers.txt', metavar='PATH')
-    parser.add_argument('-l', '--listen', metavar="LISTEN", default='127.0.0.1:' + str(POOL_PORT), help="Listener port for miners")
-    opts = parser.parse_args()
-    LOG.basicConfig(level=opts.loglevel)
-    return opts
-
-
-def main():
-    opts = parse_args()
-    bootstrap_peers = read_peers(opts.peers)
-    identity = Identity('.bismuth.key')
-    LOG.warning('Pool identity: %s', identity.address)
-    peers = PeerManager(identity)
-    if opts.listen:
-        LOG.warning('Pool listen: %s', opts.listen)
-        miners = Miners(peers, opts.listen)
-    try:
-        # peers.add(('127.0.0.1', '5868'))
-        while True:
-            shuffle(bootstrap_peers)
-            for sockaddr in bootstrap_peers[:10]:
-                peers.add(IpPort(*sockaddr))
-                time.sleep(0.1)
-            Abuse.tick()
-            print("")
-            print("------------------------------")
-            print("Mempool")
-            for row in peers.consensus(peers.mempool, False):
-                print(" %s %d %.3f" % row)
-            consensus = peers.consensus(None, True)
-            if len(consensus):
-                print("\nConsensus")
-                for row in consensus:
-                    print(" %s %d %.3f" % row)
-            if len(peers.peers):
-                print("\nClients")
-                for peer, client in peers.peers.items():
-                    print(" %r %r" % (peer, client.status()))
-            difficulty = peers.difficulty()
-            print("\nDifficulty:", difficulty)
-            if len(ResultsManager.HEIGHTS):
-                print("\nCandidates:")
-                sorted_heights = sorted(ResultsManager.HEIGHTS.items())
-                for diff, result in sorted_heights:
-                    print("\t%.2f = %r" % (diff, result))
-                # Submit transaction with highest difficulty
-                diff, result = sorted_heights[-1]
-                for peer in peers.peers.values():
-                    if peer.synched and int(diff) >= math.floor(peer._diff):
-                        new_txn = ResultsManager.sign_blocks(identity, result, peer.mempool)
-                        try:
-                            peer.submit_block(new_txn)
-                        except Exception:
-                            LOG.exception('Peer %r - Error Submitting Block')
-                print("")
-            time.sleep(2)
-    except KeyboardInterrupt:
-        print("Caught Ctrl+C - stopping gracefully")
-        miners.stop()
-        peers.stop()
-
-if __name__ == "__main__":
-    sys.exit(main())

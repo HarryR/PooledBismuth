@@ -2,9 +2,10 @@ from __future__ import print_function
 import sqlite3
 import os
 import json
-import bismuth
 from collections import defaultdict
-from common import Identity
+
+from .common import Identity
+from . import bismuth
 
 
 def double_N(value, times):
