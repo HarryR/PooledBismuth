@@ -49,7 +49,7 @@ def proof_histogram(proofs, pool_address):
 myid = Identity('.bismuth.key')
 
 
-pooldb = sqlite3.connect('.pool.db')
+pooldb = sqlite3.connect('data/pool.db')
 pooldb.text_factory = str
 poolcur = pooldb.cursor()
 poolcur.executescript("""
