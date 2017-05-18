@@ -2,6 +2,7 @@ from __future__ import print_function
 import sqlite3
 import os
 import json
+import bismuth
 from collections import defaultdict
 from common import Identity
 
@@ -15,22 +16,13 @@ def double_N(value, times):
 def load_block(blockno, block_key):
     filename = 'data/done/%d.block' % (blockno,)
     if not os.path.exists(filename):
-        return False, None, None
-    did_win = False
-    difficulty = None
+        return None
     with open(filename, 'rb') as handle:
         proofs = []
         for proof in handle:
             proof = json.loads(proof)
-            if not did_win:
-                did_win = block_key == proof[3]
-                if did_win:
-                    print('Did WIn!')
-                    difficulty = proof[2]
             proofs.append(proof)
-    if not difficulty and len(proofs):
-        difficulty = max([X[2] for X in proofs])
-    return did_win, proofs, difficulty
+    return proofs
 
 
 def proof_histogram(proofs, pool_address):
@@ -41,6 +33,7 @@ def proof_histogram(proofs, pool_address):
     total_shares = 0
     named_shares = 0
     for proof in proofs:
+        # Calculate payout relative to highest scoring Proof of Work
         gap = abs(proof[2] - min_height)
         share = double_N(1.0, gap)
         total_shares += share
@@ -97,37 +90,10 @@ CREATE TABLE IF NOT EXISTS blocks (
 """)
 
 
-def total_shmeckles(poolcur, blockno):
-    sql = "SELECT SUM(shmeckles) FROM workproof WHERE block_id < ?"
-    poolcur.execute(sql, (blockno,))
-    result = poolcur.fetchone()
-    if not result or not result[0]:
-        return 0
-    return int(result[0])
-
-
-def bismuth_balance(ledgercon, address, block_height):
-    ledgercon.execute("SELECT sum(amount) FROM transactions WHERE recipient = ?", (address,))
-    credit = ledgercon.fetchone()[0]
-    ledgercon.execute("SELECT sum(amount), sum(fee), sum(reward) FROM transactions WHERE address = ?", (address,))
-    debit, fees, rewards = ledgercon.fetchone()
-
-    if debit is None:
-        debit = 0
-    if fees is None:
-        fees = 0
-    if rewards is None:
-        rewards = 0
-    if credit is None:
-        credit = 0
-    return credit - debit - fees + rewards
-
-
 def make_address_ids(poolcur, addresses):
     placeholders = ','.join(['?'] * len(addresses))
     sql = "SELECT address, id FROM addresses WHERE address IN (%s)" % (placeholders,)
     poolcur.execute(sql, addresses)
-    # found = {row[0]: row[1] for row in poolcur.fetchall()}
     found = dict(poolcur.fetchall())
     for address in addresses:
         if address not in found:
@@ -140,7 +106,7 @@ ledgerdb = sqlite3.connect("../Bismuth/static/ledger.db")  # open to select the 
 ledgerdb.text_factory = str
 ledgercon = ledgerdb.cursor()
 ledgercon.execute("""
-    SELECT block_height, reward, openfield, timestamp, address, amount, fee, recipient FROM transactions
+    SELECT block_height, reward, openfield, timestamp, address, amount, fee, recipient, block_hash FROM transactions
     WHERE block_height > 90000
 """)  # , (myid.public_key_hashed,))
 result = ledgercon.fetchall()
@@ -149,13 +115,17 @@ result = ledgercon.fetchall()
 pool_balance = 0
 pool_shmeckles = 0
 
+prev_block_hash = None
+
 for row in result:
     address = row[4]
     blockno = row[0]
+    openfield = row[2]
     reward = float(row[1])
     amount = float(row[5])
     fees = float(row[6])
     recipient = row[7]
+    block_hash = row[8]
 
     debit = 0
     credit = 0
@@ -170,8 +140,7 @@ for row in result:
     if recipient != address:
         continue
 
-    print(blockno, "CDFR", credit, debit, fees, reward, address, recipient)
-    did_win, proofs, difficulty = load_block(blockno, row[2])
+    proofs = load_block(blockno, openfield)
     total_shares = 0
     total_work = 0
     named_shares = 0
@@ -180,10 +149,13 @@ for row in result:
         total_shares, named_shares, share_dist, work_counts, total_work = proof_histogram(proofs, myid.address)
         pool_shmeckles += 1
     named_work = 0
-    print("")
-    print("Block %d = BIS %.2f" % (blockno, reward,))
-    did_win = myid.address == row[4]
+    did_win = myid.address == address
 
+    # Calculate difficulty
+    difficulty = None
+    if prev_block_hash:
+        difficulty = bismuth.difficulty(address, openfield, prev_block_hash)
+    prev_block_hash = block_hash
 
     # balance = bismuth_balance(ledgercon, blockno, myid.address)
     # shmecks = total_shmeckles(poolcur, blockno)
@@ -191,14 +163,15 @@ for row in result:
     address_ids = make_address_ids(poolcur, share_dist.keys())
     workproof_rows = list()
     for address, shares in share_dist.items():
+        if address == myid.address:
+            continue
         address_id = address_ids[address]
-        shmeckles = round(shares / total_shares, 2)
+        shmeckles = round(shares / named_shares, 6)
         work_count = work_counts[address]
         named_work += work_count
         workproof_rows.append((blockno, address_id, shares, work_count, shmeckles))
 
     poolcur.executemany("REPLACE INTO workproof VALUES (?, ?, ?, ?, ?)", workproof_rows)
-    print("")
 
     poolcur.execute("""
     REPLACE INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

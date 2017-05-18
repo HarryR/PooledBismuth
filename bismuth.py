@@ -20,3 +20,4 @@ def verify(address, nonce, db_block_hash, diff_len):
     mining_bin = _bin_convert(mining_hash)
     if mining_search_bin in mining_bin:
         return True
+

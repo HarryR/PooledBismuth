@@ -97,6 +97,7 @@ SELECT (SUM(wp.shmeckles) / (MAX(b.stamp) - MIN(b.stamp))) * 60 * 60, wp.addr   
 				?>
 					<?php if( ! ($idx % 25) ): ?>
 					<tr>
+						<th>Timestamp</th>
 						<th>Height</th>
 						<th>Diff</th>
 						<th>Reward</th>
@@ -108,11 +109,12 @@ SELECT (SUM(wp.shmeckles) / (MAX(b.stamp) - MIN(b.stamp))) * 60 * 60, wp.addr   
 					<?php endif; ?>
 
 					<tr class="<?= $row['won'] ? 'win' : 'lose' ?>">
+						<td><?= $row['stamp'] ?></td>
 						<td><?= $row['id'] ?></td>
 						<td><?= $row['difficulty'] ?></td>
 						<td><?= round($row['reward'], 2) ?></td>
-						<td><?= substr($row['address'], 0, 10) ?></td>
-						<td><?= $row['nonce'] ?></td>
+						<td><?= htmlspecialchars(substr($row['address'], 0, 10)) ?></td>
+						<td><?= htmlspecialchars($row['nonce']) ?></td>
 						<td><?= $row['total_work'] ?></td>
 						<td>
 							<?php if( $row['total_shares'] > 0 ): ?>
@@ -134,7 +136,7 @@ SELECT (SUM(wp.shmeckles) / (MAX(b.stamp) - MIN(b.stamp))) * 60 * 60, wp.addr   
 							<?php foreach( $proofs AS $proof ): ?>
 								<?php $address = $addresses[$proof['address_id']]; ?>
 								<tr>
-									<td><?= $address ?></td>
+									<td><?= htmlspecialchars($address) ?></td>
 									<td><?= sprintf("%.2f", $proof['shmeckles']); ?></td>
 									<td><?= sprintf("%.2f", ($proof['shmeckles'] / $row['pool_shmeckles']) * $row['pool_balance'] ); ?></td>
 								</tr>
