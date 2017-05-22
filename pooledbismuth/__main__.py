@@ -1,10 +1,12 @@
+from gevent import monkey
+monkey.patch_all()
+
 import sys
 import argparse
 import logging as LOG
 
 
 from .common import POOL_PORT
-from .app import PooledBismuth, monitor
 
 
 def parse_args():
@@ -16,9 +18,10 @@ def parse_args():
                         const=LOG.DEBUG, default=LOG.WARNING,
                         help="Log debugging messages")
     parser.add_argument('--keyfile', default='.bismuth.key', help="Load/save file for miner secret identity", metavar='PATH')
-    parser.add_argument('--max-miners', help="Maximum number of miner connections", default=3000, metavar='M')
+    parser.add_argument('--max-miners', help="Maximum number of miner connections", default=1000, metavar='M')
     parser.add_argument('-p', '--peers', help="Load/save file for found peers", default='peers.txt', metavar='PATH')
-    parser.add_argument('-l', '--miners-listen', dest='miners_listen', metavar="LISTEN",
+    parser.add_argument('-l', '--ledger', help="Bismuth ledger database path", default='../Bismuth/static/ledger.db', metavar='PATH')
+    parser.add_argument('-m', '--miners-listen', dest='miners_listen', metavar="LISTEN",
                         default='0.0.0.0:' + str(POOL_PORT), help="Listener port for miners")
     cfg = parser.parse_args()
     LOG.basicConfig(level=cfg.loglevel)
@@ -27,6 +30,8 @@ def parse_args():
 
 def main():
     cfg = parse_args()
+
+    from .app import PooledBismuth, monitor
     app = PooledBismuth(cfg)
     app.start()
 

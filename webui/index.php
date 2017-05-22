@@ -15,7 +15,7 @@ $total_shm = NULL;
 $sql = "SELECT * FROM blocks WHERE stamp >= $stamp_begin ORDER BY id DESC, stamp DESC";
 $block_list = $db->query($sql)->fetchAll();
 if( 0 == count($block_list) ) {
-	die('FATAL ERROR');
+	die('Cannot open database!');
 }
 
 $latest_block = $block_list[0];

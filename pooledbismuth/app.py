@@ -8,7 +8,7 @@ from random import shuffle
 
 import gevent
 
-from .common import Identity, IpPort, Abuse
+from .common import Identity, IpPort, Abuse, load_consensus
 from .pool import PeerManager, Miners, ResultsManager
 
 
@@ -31,6 +31,8 @@ class PooledBismuth(object):
         self.identity = Identity(cfg.keyfile)
         self.peers = PeerManager(self.identity)
         self.miners = Miners(self.peers, cfg.miners_listen, cfg.max_miners) if cfg.miners_listen else None
+        for consensus in load_consensus(cfg.ledger):
+            ResultsManager.on_consensus(consensus)
 
     def _add_bootstrap_peers(self):
         """
@@ -66,20 +68,23 @@ def monitor(app):
     while True:
         print("")
         print("------------------------------")
-        print("Mempool")
-        for row in peers.consensus(peers.mempool, False):
-            print(" %s %d %.3f" % row)
-        consensus = peers.consensus(None, True)
+        consensus = peers.consensus()
         if len(consensus):
             print("\nConsensus")
+            found_100 = 0
             for row in consensus:
-                print(" %s %d %.3f" % row)
+                print(" %s %d %.3f" % (row[0], row[1], row[2]))
+                if row[2] == 100:
+                    found_100 += 1
+                if found_100 > 3:
+                    break
         if len(peers.peers):
             print("\nClients")
             for peer, client in peers.peers.items():
                 print(" %r %r" % (peer, client.status()))
         difficulty = peers.difficulty()
-        print("\nDifficulty:", difficulty)
+        if difficulty:
+            print("\nDifficulty:", difficulty)
         if len(ResultsManager.HEIGHTS):
             print("\nCandidates:")
             sorted_heights = sorted(ResultsManager.HEIGHTS.items())
@@ -88,8 +93,8 @@ def monitor(app):
             # Submit transaction with highest difficulty
             diff, result = sorted_heights[-1]
             for peer in peers.peers.values():
-                if peer.synched and int(diff) >= math.floor(peer._diff):
-                    new_txn = ResultsManager.sign_blocks(app.identity, result, peer.mempool)
+                if peer.synched and int(diff) >= math.floor(peer.difficulty):
+                    new_txn = ResultsManager.sign_blocks(app.identity, result)
                     try:
                         peer.submit_block(new_txn)
                     except Exception:

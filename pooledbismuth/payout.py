@@ -14,8 +14,8 @@ def double_N(value, times):
     return value
 
 
-def load_block(blockno, block_key):
-    filename = 'data/done/%d.block' % (blockno,)
+def load_block(blockno_or_hash):
+    filename = 'data/done/%s.block' % (str(blockno_or_hash),)
     if not os.path.exists(filename):
         return None
     with open(filename, 'rb') as handle:
@@ -141,7 +141,7 @@ for row in result:
     if recipient != address:
         continue
 
-    proofs = load_block(blockno, openfield)
+    proofs = load_block(blockno).extend(load_block(prev_block_hash))
     total_shares = 0
     total_work = 0
     named_shares = 0
@@ -176,7 +176,8 @@ for row in result:
 
     poolcur.execute("""
     REPLACE INTO blocks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (blockno, row[3], int(did_win), total_shares, row[2], reward, row[4], difficulty, total_work, named_work, named_shares, pool_balance, pool_shmeckles))
+    """, (blockno, row[3], int(did_win), total_shares, row[2], reward, row[4], difficulty,
+          total_work, named_work, named_shares, pool_balance, pool_shmeckles))
 
     # Openfield cost:
     # float(len(db_openfield)) / 100000

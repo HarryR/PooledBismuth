@@ -1,9 +1,12 @@
+from __future__ import print_function
+
 import os
 import time
 import socket
 import base64
 import hashlib
 import logging as LOG
+import sqlite3
 from collections import namedtuple, defaultdict
 
 from Crypto import Random
@@ -14,8 +17,10 @@ from Crypto.PublicKey import RSA
 PROTO_VERSION = "mainnnet0009"
 MINER_VERSION_ROOT = "morty"
 
+LOWEST_DIFFICULTY = 37
+
 MONITOR_PORT = 5654
-POOL_PORT = 5659
+POOL_PORT = 5657
 STRIKE_TIME = 60
 STRIKE_COUNT = 3
 CONNECT_TIMEOUT = 5
@@ -27,7 +32,27 @@ MINER_TUNE_HISTORY = 10
 MinerJob = namedtuple('MinerJob', ('diff', 'address', 'block'))
 MinerResult = namedtuple('MinerResult', ('diff', 'address', 'block', 'nonce'))
 
+ConsensusBlock = namedtuple('ConsensusBlock', ('height', 'hash', 'stamp'))
+
 IpPort = namedtuple('IpPort', ('ip', 'port'))
+
+
+def load_consensus(ledger_path):
+    ledgerdb = sqlite3.connect(ledger_path)  # open to select the last tx to create a new hash from
+    ledgerdb.text_factory = str
+    ledgercon = ledgerdb.cursor()
+    ledgercon.execute("""
+        SELECT * FROM transactions
+        WHERE reward > 0
+        ORDER BY block_height DESC
+        LIMIT 120
+    """)  # , (myid.public_key_hashed,))
+    results_list = ledgercon.fetchall()
+
+    return reversed([
+        ConsensusBlock(int(result[0]), result[7], float(result[1]))
+        for result in results_list
+    ])
 
 
 class Abuse(object):
@@ -122,6 +147,7 @@ class ProtocolBase(object):
             data = str(data)
             self.sock.sendall((str(len(data))).zfill(10))
             self.sock.sendall(data)
+            LOG.debug('%r - sent: %r', self, data)
 
     def _recv(self, datalen=10):
         data = self.sock.recv(datalen)
@@ -138,4 +164,29 @@ class ProtocolBase(object):
             chunks.append(chunk)
             bytes_recd = bytes_recd + len(chunk)
         segments = b''.join(chunks)
+        LOG.debug('%r - received: %r', self, segments)
         return segments
+
+
+def calc_diff(block_history, time_now, db_timestamp_last):
+    half_hour_ago = time_now - (60*30)
+    blocks_per_30 = 0
+    for row in block_history:
+        if row[2] is not None:
+            stamp = float(row[2][0][0])
+        else:
+            stamp = row[3]
+        if stamp > half_hour_ago:
+            blocks_per_30 += 1
+
+    if not blocks_per_30:
+        return None
+
+    diff = blocks_per_30 * 2
+    drop_factor = (60*2)  # drop 0,5 diff per minute #hardfork
+    if time_now > db_timestamp_last + (60*2):  # start dropping after 2 minutes
+        diff = diff - (time_now - db_timestamp_last) / drop_factor  # drop 0,5 diff per minute (1 per 2 minutes)
+        # drop diff per minute if over target
+    if time_now > db_timestamp_last + (60*6) or diff < LOWEST_DIFFICULTY:  # 5 m lim
+        diff = LOWEST_DIFFICULTY  # 5 m lim
+    return int(diff)

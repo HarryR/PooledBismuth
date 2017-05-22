@@ -1,4 +1,12 @@
 import hashlib
+import logging as LOG
+
+try:
+    import quickbismuth
+    LOG.info('Using QuickBismuth %r', quickbismuth.__version__)
+except ImportError:
+    LOG.warning('QuickBismuth not found, using slow Python version')
+    quickbismuth = None
 
 
 def _bin_convert(string):
@@ -13,6 +21,9 @@ def difficulty(address, nonce, db_block_hash):
 
 
 def verify(address, nonce, db_block_hash, diff_len):
+    if quickbismuth:
+        return quickbismuth.bismuth_verify(address, nonce, db_block_hash, diff_len)
+
     diff_len = int(diff_len)
     mining_search_bin = _bin_convert(db_block_hash)[0:diff_len]
     mining_input = address + nonce + db_block_hash
@@ -20,4 +31,3 @@ def verify(address, nonce, db_block_hash, diff_len):
     mining_bin = _bin_convert(mining_hash)
     if mining_search_bin in mining_bin:
         return True
-
